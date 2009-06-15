@@ -283,7 +283,7 @@ patches and collaborators are welcome.
 
 L<AnyEvent>,
 L<AnyEvent::FastPing>,
-L<EV>,
+L<EV>
 
 =head1 LICENSE
 
