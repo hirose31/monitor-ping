@@ -1,0 +1,303 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use utf8;
+use Carp;
+use Data::Dumper;
+$Data::Dumper::Indent   = 1;
+$Data::Dumper::Deepcopy = 1;
+$Data::Dumper::Sortkeys = 1;
+use IO::File;
+STDOUT->autoflush(1);
+STDERR->autoflush(1);
+use Getopt::Long;
+use Pod::Usage;
+
+use EV;
+use AnyEvent;
+use AnyEvent::FastPing;
+use Socket;
+use Net::DNS;
+
+my $Debug = 0;
+
+sub dprint (@) {
+    return unless $Debug;
+    chomp(my @m = @_);
+    print STDERR 'DEBUG: ', join(" ", @m),"\n";
+}
+
+sub dprint2(@) {
+    dprint @_ if $Debug >= 2;
+}
+
+sub p(@) {
+    my $d = Dumper(\@_);
+    $d =~ s/\\x{([0-9a-z]+)}/chr(hex($1))/ge;
+    print $d;
+}
+
+
+# "ipaddr" => {
+#   hostname  => "Str",
+#   attempt   => "Int",
+#   last_pong => "Int",
+# },
+my %Status;
+
+# "ipaddr" => 1
+my %Alive;
+
+my $Resolver = Net::DNS::Resolver->new;
+my $Scramble = Scramble->new;
+
+MAIN: {
+    my %opt;
+    Getopt::Long::Configure("bundling");
+    GetOptions(\%opt,
+               'timeout|t=f'           => \my $timeout,
+               'max-check-attempt|x=i' => \my $max_check_attempt,
+               'alert-interval|a=i'    => \my $alert_interval,
+               'debug|d+'              => \$Debug,
+               'help|h|?'              => sub{ pod2usage(-verbose=>1) },
+              ) or pod2usage();
+    dprint "DEBUG MODE LEVEL=$Debug";
+
+    $timeout           ||= 30.0;
+    $max_check_attempt ||= 0;
+    $alert_interval    ||= 0;
+    dprint "timeout<$timeout>";
+    dprint "max_check_attempt<$max_check_attempt>";
+    dprint "alert_interval<$alert_interval>";
+
+    my @range;
+
+    for my $target (@ARGV) {
+        my($ip, $hostname);
+        if ($target =~ /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/) {
+            $ip = $target;
+            $hostname = resolve_ip($ip) || $ip;
+        } else {
+            $hostname = $target;
+            $ip = resolve_hostname($hostname);
+        }
+        unless ($ip && $hostname) {
+            $ip ||= '-'; $hostname ||= '-';
+            carp "cannot resolve: ip<$ip>hostname<$hostname>";
+            next;
+        }
+        $Status{$ip} = { hostname => $hostname, attempt => 0, last_pong => 0, };
+
+        push @range, [inet_aton($ip), inet_aton($ip)];
+    }
+    dprint Dumper(\%Status);
+
+    AnyEvent::FastPing::register_cb {
+        my $n = 0;
+        for (@{$_[0]}) {
+            my $ip = inet_ntoa $_->[0];
+            $Alive{$ip} = 1;
+            $Status{$ip}{last_pong} = time;
+            dprint sprintf "pong [%d] ip<%s> payload<%d> elapse<%g>\n",
+                $n++,
+                $ip,
+                $_->[2],
+                $_->[1];
+        }
+    };
+
+    my $wait_signal = AnyEvent->signal(
+        signal => "USR1",
+        cb     => sub {
+            print Data::Dumper->Dump([\%Status],['$Status']);
+        });
+
+    while (1) {
+        %Alive = ();
+        my $done = AnyEvent->condvar;
+        AnyEvent::FastPing::icmp_ping(
+            \@range,
+            0,
+            19,
+            sub { $done->broadcast },
+           ) or croak $!;
+        $done->wait;
+
+        WAIT_FOR_PONG: {
+            my $done   = AnyEvent->condvar;
+            my $wait_w = AnyEvent->timer(
+                after => $timeout || 2.0,
+                cb    => sub { $done->broadcast },
+               );
+            $done->wait;
+        }
+
+        dprint2 Dumper \%Status;
+        dprint2 Dumper \%Alive;
+
+        my $now = time;
+        while (my ($ip, $st) = each %Status) {
+            if (exists $Alive{$ip} && $Alive{$ip} >= 1) {
+                # alive
+                dprint "alive $st->{hostname}";
+                if ($st->{attempt} != 0) {
+                    # dead -> alive
+                    $Scramble->alert(
+                        sprintf "%s is UP", $st->{hostname});
+                    $st->{attempt} = 0;
+                }
+            } else {
+                # dead
+                dprint "dead  $st->{hostname}";
+                if ($st->{attempt} >= $max_check_attempt
+                    && ($st->{attempt} - $max_check_attempt) % ($alert_interval+1) == 0
+                   ) {
+                    # alive -> dead
+                    $Scramble->alert(
+                        sprintf "%s is DOWN", $st->{hostname});
+                }
+                $st->{attempt}++;
+            }
+        }
+
+        last if $timeout == 0;
+        dprint2 "--";
+    }
+}
+
+sub resolve_ip {
+    my($hostname) = @_;
+
+    my $query = $Resolver->search($hostname);
+
+    if ($query) {
+        for my $rr ($query->answer) {
+            next unless $rr->type eq "PTR";
+            my $hostname = do {
+                $rr->rdatastr =~ /^([^.]+)\./ ? $1 : $rr->rdatastr;
+            };
+            return $hostname;
+        }
+    } else {
+        carp "query failed: ", $Resolver->errorstring;
+    }
+
+    return;
+}
+
+sub resolve_hostname {
+    my($hostname) = @_;
+
+    my $query = $Resolver->search($hostname);
+
+    if ($query) {
+        for my $rr ($query->answer) {
+            next unless $rr->type eq "A";
+            return $rr->address;
+        }
+    } else {
+        carp "query failed: ", $Resolver->errorstring;
+    }
+
+    return;
+}
+
+package Scramble;
+
+sub new {
+    my($class, %opt) = @_;
+
+    my $self = bless {
+       }, $class;
+
+    return $self;
+}
+
+sub alert {
+    my($self, @mesg) = @_;
+    printf STDERR "[ALERT] %s\n", join(" ", @mesg);
+}
+
+
+__END__
+
+=encoding utf-8
+
+=head1 NAME
+
+B<monitor-ping> - health check a large number of hosts by ping (ICMP)
+
+=head1 SYNOPSIS
+
+B<monitor-ping> [ B<-d> ] [ B<--timeout> I<sec> ] [ B<--max-check-attempt> I<n_time> ] [ B<--alert-interval> I<n_time> ] I<ip_addr> I<ip_addr> I<...>
+
+  $ monitor-ping sv101 sv102 10.10.0.254
+
+=head1 DESCRIPTION
+
+health check a large number of hosts by ping (ICMP).
+We use AnyEvent::FastPing and EV to send/recv ICMP packet asynchronously.
+
+=head1 OPTIONS
+
+=over 4
+
+=item --timeout I<sec>
+
+specifies monitor loop interval (= timeout for returning ICMP packets) by seconds.
+
+=item --max-check-attempt I<n_time>
+
+specifies number of times that this script will retry the ping check if it returns any packets.
+
+Setting this value to 0 will cause to move to DOWN state without retrying.
+
+=item --alert-interval I<n_time>
+
+specifies number of times to wait before send alert message if host is still DOWN state.
+
+Setting this value to 0 will cause to send alert every monitoring loop during DOWN state,
+3 will send alert every 3 monitoring loop, thus send alert every 3*$timeout seconds.
+
+=item B<-d>
+
+increase debug level.
+-d -d more verbosely.
+
+=back
+
+=head1 AUTHOR
+
+HIROSE Masaaki E<lt>hirose31 _at_ gmail.comE<gt>
+
+=head1 REPOSITORY
+
+L<http://github.com/hirose31/monitor-ping/tree/master>
+
+  git clone git://github.com/hirose31/monitor-ping.git
+
+patches and collaborators are welcome.
+
+=head1 SEE ALSO
+
+L<AnyEvent>,
+L<AnyEvent::FastPing>,
+L<EV>,
+
+=head1 LICENSE
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
+
+=cut
+
+# for Emacsen
+# Local Variables:
+# mode: cperl
+# cperl-indent-level: 4
+# indent-tabs-mode: nil
+# coding: utf-8
+# End:
+
+# vi: set ts=4 sw=4 sts=0 :

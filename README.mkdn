@@ -1,0 +1,61 @@
+# NAME
+
+__monitor-ping__ - health check a large number of hosts by ping (ICMP)
+
+# SYNOPSIS
+
+__monitor-ping__ [ __-d__ ] [ __--timeout__ _sec_ ] [ __--max-check-attempt__ _n_time_ ] [ __--alert-interval__ _n_time_ ] _ip_addr_ _ip_addr_ _..._
+
+      $ monitor-ping sv101 sv102 10.10.0.254
+
+# DESCRIPTION
+
+health check a large number of hosts by ping (ICMP).
+We use AnyEvent::FastPing and EV to send/recv ICMP packet asynchronously.
+
+# OPTIONS
+
+- --timeout _sec_
+
+    specifies monitor loop interval (= timeout for returning ICMP packets) by seconds.
+
+- --max-check-attempt _n_time_
+
+    specifies number of times that this script will retry the ping check if it returns any packets.
+
+    Setting this value to 0 will cause to move to DOWN state without retrying.
+
+- --alert-interval _n_time_
+
+    specifies number of times to wait before send alert message if host is still DOWN state.
+
+    Setting this value to 0 will cause to send alert every monitoring loop during DOWN state,
+3 will send alert every 3 monitoring loop, thus send alert every 3*$timeout seconds.
+
+- __-d__
+
+    increase debug level.
+-d -d more verbosely.
+
+# AUTHOR
+
+HIROSE Masaaki <hirose31 _at_ gmail.com>
+
+# REPOSITORY
+
+<http://github.com/hirose31/monitor-ping/tree/master>
+
+      git clone git://github.com/hirose31/monitor-ping.git
+
+patches and collaborators are welcome.
+
+# SEE ALSO
+
+[[AnyEvent]],
+[[AnyEvent::FastPing]],
+[[EV]],
+
+# LICENSE
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
