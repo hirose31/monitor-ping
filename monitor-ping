@@ -54,19 +54,18 @@ my $Scramble = Scramble->new;
 
 MAIN: {
     my %opt;
+    my $timeout           = 30.0;
+    my $max_check_attempt = 0;
+    my $alert_interval    = 0;
     Getopt::Long::Configure("bundling");
     GetOptions(\%opt,
-               'timeout|t=f'           => \my $timeout,
-               'max-check-attempt|x=i' => \my $max_check_attempt,
-               'alert-interval|a=i'    => \my $alert_interval,
+               'timeout|t=f'           => \$timeout,
+               'max-check-attempt|x=i' => \$max_check_attempt,
+               'alert-interval|a=i'    => \$alert_interval,
                'debug|d+'              => \$Debug,
                'help|h|?'              => sub{ pod2usage(-verbose=>1) },
               ) or pod2usage();
     dprint "DEBUG MODE LEVEL=$Debug";
-
-    $timeout           ||= 30.0;
-    $max_check_attempt ||= 0;
-    $alert_interval    ||= 0;
     dprint "timeout<$timeout>";
     dprint "max_check_attempt<$max_check_attempt>";
     dprint "alert_interval<$alert_interval>";
